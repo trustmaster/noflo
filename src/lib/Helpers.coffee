@@ -280,6 +280,10 @@ exports.WirePattern = (component, config, proc) ->
           component.dropRequest key
           delete component.gcTimestamps[key]
 
+  #####################
+  # TODO: STOPPED HERE
+  #####################
+
   # Grouped ports
   for port in inPorts
     do (port) ->
