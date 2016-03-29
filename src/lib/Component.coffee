@@ -32,6 +32,7 @@ class Component extends EventEmitter
     else
       @outPorts = new ports.OutPorts options.outPorts
 
+    @icon = options.icon if options.icon
     @description = options.description if options.description
     @ordered = options.ordered if 'ordered' of options
     @activateOnInput = options.activateOnInput if 'activateOnInput' of options
