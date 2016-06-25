@@ -36,11 +36,16 @@ class Component extends EventEmitter
     @autoOrdering = options.autoOrdering ? null
     @outputQ = []
     @activateOnInput = options.activateOnInput ? true
-    @forwardBrackets = in: ['out', 'error']
+    @forwardBracketsFrom = ['in']
+    @forwardBracketsTo = ['out', 'error']
     @bracketCounter = {}
+    @bracketBuffer = {}
+    @fwdBracketCounter = {}
 
-    if 'forwardBrackets' of options
-      @forwardBrackets = options.forwardBrackets
+    if 'forwardBracketsFrom' of options
+      @forwardBracketsFrom = options.forwardBracketsFrom
+    if 'forwardBracketsTo' of options
+      @forwardBracketsTo = options.forwardBracketsTo
 
     if typeof options.process is 'function'
       @process options.process
@@ -74,20 +79,27 @@ class Component extends EventEmitter
 
   isStarted: -> @started
 
-  # Ensures braket forwarding map is correct for the existing ports
+  # Ensures bracket forwarding map is correct for the existing ports
   prepareForwarding: ->
-    for inPort, outPorts of @forwardBrackets
-      unless inPort of @inPorts.ports
-        delete @forwardBrackets[inPort]
-        continue
-      tmp = []
-      for outPort in outPorts
-        tmp.push outPort if outPort of @outPorts.ports
-      if tmp.length is 0
-        delete @forwardBrackets[inPort]
-      else
-        @forwardBrackets[inPort] = tmp
-        @bracketCounter[inPort] = 0
+    @forwardBracketsFrom = (p for p in @forwardBracketsFrom when p of @inPorts.ports)
+    for inPort in @forwardBracketsFrom
+      @bracketCounter[inPort] = 0
+    @forwardBracketsTo = (p for p in @forwardBracketsTo when p of @outPorts.ports)
+
+  incFwdCounter: (scope, port) ->
+    @fwdBracketCounter[scope] = {} unless scope of @fwdBracketCounter
+    @fwdBracketCounter[scope][port] = 0 unless port of @fwdBracketCounter[scope]
+    @fwdBracketCounter[scope][port]++
+
+  decFwdCounter: (scope, port) ->
+    return unless @fwdBracketCounter[scope]?[port]
+    @fwdBracketCounter[scope][port]--
+    delete @fwdBracketCounter[scope][port] if @fwdBracketCounter[scope][port] is 0
+    delete @fwdBracketCounter[scope] if Object.keys(@fwdBracketCounter[scope]).length is 0
+
+  getFwdCounter: (scope, port) ->
+    return 0 unless @fwdBracketCounter[scope]?[port]
+    return @fwdBracketCounter[scope][port]
 
   # Sets process handler function
   process: (handle) ->
@@ -109,23 +121,28 @@ class Component extends EventEmitter
     if ip.type is 'openBracket'
       @autoOrdering = true if @autoOrdering is null
       @bracketCounter[port.name]++
-    if port.name of @forwardBrackets and
+    if @forwardBracketsFrom.indexOf(port.name) isnt -1 and
     (ip.type is 'openBracket' or ip.type is 'closeBracket')
       # Bracket forwarding
-      outputEntry =
-        __resolved: true
-        __forwarded: true
-        __type: ip.type
-        __scope: ip.scope
-      for outPort in @forwardBrackets[port.name]
-        outputEntry[outPort] = [] unless outPort of outputEntry
-        outputEntry[outPort].push ip
+      @bracketBuffer[ip.scope] = [] unless ip.scope of @bracketBuffer
+      # Closing brackets coming afterwards are just forwarded
+      if ip.type is 'closeBracket' and @bracketBuffer[ip.scope].length is 0
+        outputEntry =
+          __resolved: true
+        for outPort, count of @fwdBracketCounter[ip.scope]
+          if count > 0
+            outputEntry[outPort] = [] unless outPort of outputEntry
+            outputEntry[outPort].push ip
+            @decFwdCounter ip.scope, outPort
+        if Object.keys(outputEntry).length > 1
+          @outputQ.push outputEntry
+          @processOutputQueue()
+      else
+        @bracketBuffer[ip.scope].push ip
       if ip.scope?
         port.scopedBuffer[ip.scope].pop()
       else
         port.buffer.pop()
-      @outputQ.push outputEntry
-      @processOutputQueue()
       return
     return unless port.options.triggering
     result = {}
@@ -271,6 +288,8 @@ class PortBuffer
 class ProcessOutput
   constructor: (@ports, @ip, @nodeInstance, @result) ->
     @scope = @ip.scope
+    @bracketsToForward = null
+    @forwardedBracketsTo = []
 
   # Sets component state to `activated`
   activate: ->
@@ -289,9 +308,9 @@ class ProcessOutput
     err = [err] unless multiple
     if 'error' of @ports and
     (@ports.error.isAttached() or not @ports.error.isRequired())
-      @sendIP 'error', new IP 'openBracket' if multiple
-      @sendIP 'error', e for e in err
-      @sendIP 'error', new IP 'closeBracket' if multiple
+      @send error: new IP 'openBracket' if multiple
+      @send error: e for e in err
+      @send error: new IP 'closeBracket' if multiple
     else
       throw e for e in err
 
@@ -308,9 +327,33 @@ class ProcessOutput
     else
       @nodeInstance.outPorts[port].sendIP ip
 
+  prepareOpenBrackets: ->
+    @bracketsToForward = []
+    hasOpening = false
+    while @nodeInstance.bracketBuffer[@scope]?.length > 0
+      ip = @nodeInstance.bracketBuffer[@scope][0]
+      if ip.type is 'openBracket'
+        @bracketsToForward.push @nodeInstance.bracketBuffer[@scope].shift()
+        hasOpening = true
+      else
+        break if hasOpening
+        # Closing brackets from previous execution need to be forwarded
+        @bracketsToForward.push @nodeInstance.bracketBuffer[@scope].shift()
+
+  prepareCloseBrackets: ->
+    @bracketsToForward = []
+    while @nodeInstance.bracketBuffer[@scope]?.length > 0
+      ip = @nodeInstance.bracketBuffer[@scope][0]
+      if ip.type is 'closeBracket'
+        @bracketsToForward.push @nodeInstance.bracketBuffer[@scope].shift()
+      else
+        break
+
   # Sends packets for each port as a key in the map
   # or sends Error or a list of Errors if passed such
   send: (outputMap) ->
+    # Prepare brackets to be forwareded
+    @prepareOpenBrackets() unless @bracketsToForward
     if (@nodeInstance.ordered or @nodeInstance.autoOrdering) and
     not ('__resolved' of @result)
       @activate()
@@ -324,10 +367,21 @@ class ProcessOutput
         mapIsInPorts = true
 
     if componentPorts.length is 1 and not mapIsInPorts
-      @sendIP componentPorts[0], outputMap
-      return
+      ip = outputMap
+      outputMap = {}
+      outputMap[componentPorts[0]] = ip
 
     for port, packet of outputMap
+      if @nodeInstance.forwardBracketsTo.indexOf(port) isnt -1 and @forwardedBracketsTo.indexOf(port) is -1
+        # Forward openening brackets before sending data
+        for ip in @bracketsToForward
+          @sendIP port, ip
+          if ip.type is 'openBracket'
+            @nodeInstance.incFwdCounter ip.scope, port
+          else
+            @nodeInstance.decFwdCounter ip.scope, port
+        @forwardedBracketsTo.push port
+      # Then send current output
       @sendIP port, packet
 
   # Sends the argument via `send()` and marks activation as `done()`
@@ -344,12 +398,29 @@ class ProcessOutput
     for key, val of options
       @ip[key] = val
     @ip.data = data
-    @sendIP 'out', @ip
-    @done()
+    @sendDone out: @ip
 
   # Finishes process activation gracefully
   done: (error) ->
     @error error if error
+    # TODO return @bracketsToForward back to buffer if nothing was sent?
+    # This makes buffer grow and results into empty brackets
+    # if @forwardedBracketsTo.length is 0 and @bracketsToForward.length
+    #   @nodeInstance.bracketBuffer[@scope] = @bracketsToForward.concat @nodeInstance.bracketBuffer[@scope]
+    @prepareCloseBrackets()
+    # Forward closing brackets to any ports that we have sent to
+    if @bracketsToForward.length > 0
+      for port in @forwardedBracketsTo
+        for ip in @bracketsToForward
+          @sendIP port, ip
+          if ip.type is 'openBracket'
+            @nodeInstance.incFwdCounter ip.scope, port
+          else
+            @nodeInstance.decFwdCounter ip.scope, port
+      @forwardedBracketsTo = []
+    @bracketsToForward = null
+
+    # Flush the queue
     if @nodeInstance.ordered or @nodeInstance.autoOrdering
       @result.__resolved = true
       @nodeInstance.processOutputQueue()
