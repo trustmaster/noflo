@@ -407,18 +407,19 @@ class ProcessOutput
     # This makes buffer grow and results into empty brackets
     # if @forwardedBracketsTo.length is 0 and @bracketsToForward.length
     #   @nodeInstance.bracketBuffer[@scope] = @bracketsToForward.concat @nodeInstance.bracketBuffer[@scope]
-    @prepareCloseBrackets()
-    # Forward closing brackets to any ports that we have sent to
-    if @bracketsToForward.length > 0
-      for port in @forwardedBracketsTo
-        for ip in @bracketsToForward
-          @sendIP port, ip
-          if ip.type is 'openBracket'
-            @nodeInstance.incFwdCounter ip.scope, port
-          else
-            @nodeInstance.decFwdCounter ip.scope, port
-      @forwardedBracketsTo = []
-    @bracketsToForward = null
+    if @forwardedBracketsTo.length > 0
+      @prepareCloseBrackets()
+      # Forward closing brackets to any ports that we have sent to
+      if @bracketsToForward.length > 0
+        for port in @forwardedBracketsTo
+          for ip in @bracketsToForward
+            @sendIP port, ip
+            if ip.type is 'openBracket'
+              @nodeInstance.incFwdCounter ip.scope, port
+            else
+              @nodeInstance.decFwdCounter ip.scope, port
+        @forwardedBracketsTo = []
+      @bracketsToForward = null
 
     # Flush the queue
     if @nodeInstance.ordered or @nodeInstance.autoOrdering
